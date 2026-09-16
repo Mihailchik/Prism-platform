@@ -8,7 +8,14 @@ import requests
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+import modules as modules_pkg  # noqa: E402
 from modules.cert_transparency import CertTransparency  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def no_backoff(monkeypatch):
+    """crt.sh is retried before the fallback (#381); do not sleep between tries."""
+    monkeypatch.setattr(modules_pkg, "RETRY_BACKOFF_SECONDS", 0)
 
 CRTSH_OK = [
     {"id": 1, "entry_timestamp": "2026-01-01T00:00:00", "not_before": "2026-01-01",
@@ -42,7 +49,11 @@ class _Response:
 
 
 def _route(monkeypatch, crtsh, certspotter):
-    """Answer requests.get by host, recording which sources were asked."""
+    """Answer requests.get by host, recording which sources were asked.
+
+    crt.sh answers the same way on every attempt, so a retried failure shows up
+    as repeated "crt.sh" entries in the recorded calls.
+    """
     calls = []
 
     def fake_get(url, **kwargs):
@@ -90,7 +101,12 @@ def test_crtsh_failure_falls_back_to_certspotter(monkeypatch, crtsh):
     assert result["error"] is None
     assert result["source"] == "certspotter"
     assert result["fallback_reason"]
-    assert [source for source, _ in calls] == ["crt.sh", "certspotter"]
+    # A transient crt.sh failure is retried first (#381); certspotter is asked
+    # once, after crt.sh is done, and is never retried itself.
+    sources = [source for source, _ in calls]
+    assert sources[-1] == "certspotter"
+    assert sources.count("certspotter") == 1
+    assert set(sources[:-1]) == {"crt.sh"}
 
 
 def test_fallback_subdomains_are_filtered_normalised_and_deduplicated(monkeypatch):
@@ -148,3 +164,4 @@ def test_empty_crtsh_answer_is_not_a_failure(monkeypatch):
     assert result["error"] is None
     assert result["subdomains"] == []
     assert [source for source, _ in calls] == ["crt.sh"]
+    assert "certspotter" not in [source for source, _ in calls]
